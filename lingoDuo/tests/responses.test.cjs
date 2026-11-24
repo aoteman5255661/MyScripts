@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { readFileSync } = require('node:fs');
+const { readFileSync, readdirSync } = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
@@ -80,6 +80,31 @@ for (const name of profiles) {
             assert.deepEqual(JSON.parse(result), envelope);
         }
     });
+
+    test(`${name} keeps subscription records stable across repeated passes`, async () => {
+        const existing = { id: 'gold_subscription', subscriptionInfo: { expectedExpiration: 123 }, extra: 'kept' };
+        const other = { id: 'sample-item', extra: 'kept' };
+        for (const shopItems of [[other], [other, existing], [existing, { ...existing, extra: 'second' }]]) {
+            const first = await run(name, JSON.stringify({ shopItems, trackingProperties: { sample: true } }));
+            const edited = JSON.parse(first.replacement);
+            assert.deepEqual(edited.shopItems.slice(0, shopItems.length), shopItems);
+            assert.equal(edited.shopItems.filter(item => item.id === 'gold_subscription').length,
+                Math.max(1, shopItems.filter(item => item.id === 'gold_subscription').length));
+            assert.equal(edited.trackingProperties.sample, true);
+
+            const second = await run(name, first.replacement);
+            assert.deepEqual(JSON.parse(second.replacement ?? first.replacement), edited);
+        }
+    });
+
+    test(`${name} processes nullable shop entries while preserving their order`, async () => {
+        const shopItems = [null, false, 7, 'sample', { id: 'sample-item' }];
+        const result = await run(name, JSON.stringify({ shopItems }));
+        const edited = JSON.parse(result.replacement);
+        assert.deepEqual(edited.shopItems.slice(0, shopItems.length), shopItems);
+        assert.equal(edited.shopItems.length, shopItems.length + 1);
+        assert.equal(edited.shopItems[shopItems.length].id, 'gold_subscription');
+    });
 }
 
 test('switches and multiplier selections accept only supported values', () => {
@@ -101,6 +126,41 @@ test('switches and multiplier selections accept only supported values', () => {
     }
 });
 
+test('enhanced options find existing boosts among nullable shop entries', async () => {
+    const args = { xp_boost: 'true', multiplier: '3' };
+    for (const existing of [[], [{ id: 'xp_boost_stackable', xpBoostMultiplier: 2, extra: 'kept' }]]) {
+        const shopItems = [null, false, ...existing];
+        const first = await run('xaM-enhanced', JSON.stringify({ shopItems }), {}, args);
+        const edited = JSON.parse(first.replacement);
+        assert.deepEqual(edited.shopItems.slice(0, 2), [null, false]);
+        const boosts = edited.shopItems.filter(item => item?.id === 'xp_boost_stackable');
+        assert.equal(boosts.length, 1);
+        assert.equal(boosts[0].xpBoostMultiplier, 3);
+        assert.equal(boosts[0].expectedExpirationDate - boosts[0].purchaseDate, 3600);
+        assert.equal(boosts[0].extra, existing[0]?.extra);
+
+        const second = await run('xaM-enhanced', first.replacement, {}, args);
+        const repeated = JSON.parse(second.replacement ?? first.replacement);
+        assert.equal(repeated.shopItems.filter(item => item?.id === 'xp_boost_stackable').length, 1);
+        assert.equal(repeated.shopItems.filter(item => item?.id === 'gold_subscription').length, 1);
+    }
+});
+
+test('enhanced course traversal tolerates empty section, unit and level entries', async () => {
+    const lockedLevel = { id: 'sample-level', state: 'locked' };
+    const currentCourse = {
+        id: 'sample-course',
+        pathSectioned: [null, false, {}, {
+            units: [null, 7, {}, {
+                levels: [null, 'sample', {}, lockedLevel, { state: 'completed' }]
+            }]
+        }]
+    };
+    const result = await run('xaM-enhanced', JSON.stringify({ shopItems: [], currentCourse }), {}, { unlock_all: true });
+    lockedLevel.state = 'active';
+    assert.deepEqual(JSON.parse(result.replacement).currentCourse, currentCourse);
+});
+
 test('both excluded practice types preserve all content, including elements', async () => {
     for (const type of ['MATCH_PRACTICE', 'SIDE_QUEST_RAMP_UP_PRACTICE']) {
         unchanged(await run('clear', JSON.stringify({ type, challenges: ['sample'], elements: ['sample'] })));
@@ -116,6 +176,33 @@ test('empty, non-array and error fields are preserved', async () => {
     ]) {
         unchanged(await run('clear', JSON.stringify(data)));
     }
+});
+
+test('practice edits clear populated pools and preserve session metadata', async () => {
+    const session = {
+        type: 'sample', id: 'sample-session', language: 'en',
+        elements: ['sample'], challenges: ['sample'], adaptiveChallenges: ['sample'],
+        adaptiveInterleavedChallenges: ['sample'], mistakesReplacementChallenges: ['sample']
+    };
+    const first = await run('clear', JSON.stringify(session));
+    assert.deepEqual(JSON.parse(first.replacement), {
+        type: 'sample', id: 'sample-session', language: 'en',
+        elements: [], challenges: [], adaptiveChallenges: [],
+        adaptiveInterleavedChallenges: [], mistakesReplacementChallenges: []
+    });
+    assert.equal(first.serializations, 1);
+    unchanged(await run('clear', first.replacement));
+});
+
+test('story edits preserve challenge fields when the practice type is absent', async () => {
+    const story = { id: 'sample-story', elements: ['sample'], challenges: ['kept'], extra: { language: 'en' } };
+    const result = await run('clear', JSON.stringify(story));
+    assert.deepEqual(JSON.parse(result.replacement), { ...story, elements: [] });
+});
+
+test('a malformed practice pool near the end discards the entire edit', async () => {
+    const body = JSON.stringify({ type: 'sample', elements: ['sample'], mistakesReplacementChallenges: {} });
+    unchanged(await run('clear', body));
 });
 
 test('invalid minute settings are rejected before reading JSON', async () => {
@@ -168,5 +255,49 @@ test('both Loon plugin files match endpoint segments and ignore lookalikes and q
     assert.ok(timer.test(host + '/v1/live-ops-challenges?locale=en'));
     for (const suffix of ['/v1/live-ops-challenges-old', '/other?to=/live-ops-challenges']) {
         assert.equal(timer.test(host + suffix), false);
+    }
+});
+
+test('configuration URLs use this repository and resolve to exact local asset names', () => {
+    const filenames = ['lingoDuo.plugin', 'lingoDuo-enchanced.plugin', 'lingoDuo-xaM.module', 'lingoDuo-xaM.conf'];
+    const assets = new Set(readdirSync(directory));
+    const rawPrefix = 'https://raw.githubusercontent.com/aoteman5255661/MyScripts/main/lingoDuo/';
+    const homepage = 'https://github.com/aoteman5255661/MyScripts/tree/main/lingoDuo';
+    for (const filename of filenames) {
+        const content = readFileSync(path.join(directory, filename), 'utf8');
+        const urls = content.match(/https:\/\/(?:raw\.githubusercontent\.com|github\.com)\/[^\s"',)]+/g) || [];
+        assert.ok(urls.length > 0, filename);
+        for (const url of urls) {
+            if (url === homepage) continue;
+            assert.ok(url.startsWith(rawPrefix), `${filename} references ${url}`);
+            assert.ok(assets.has(url.slice(rawPrefix.length)), `${filename} references a missing asset ${url}`);
+        }
+    }
+});
+
+test('profile rules match the same endpoints across Loon, Surge and Quantumult X', () => {
+    const read = name => readFileSync(path.join(directory, name), 'utf8');
+    const pluginLine = read('lingoDuo.plugin').split(/\r?\n/).find(line => line.includes('/lingoDuo-xaM-enhanced.js"'));
+    const [, pluginSource, pluginFlags] = pluginLine.match(/ ~= \/(.+)\/([a-z]*) then script\(/);
+    const [, moduleSource] = read('lingoDuo-xaM.module').match(/,pattern=(.+?),script-path=/);
+    const quantumultLine = read('lingoDuo-xaM.conf').split(/\r?\n/).find(line => line.includes(' url script-response-body '));
+    const [quantumultSource] = quantumultLine.split(' url script-response-body ');
+    const patterns = [new RegExp(pluginSource, pluginFlags), new RegExp(moduleSource), new RegExp(quantumultSource)];
+    const valid = [
+        'https://ios-api-v2.duolingo.com/2023-05-23/batch',
+        'https://ios-api-ab12.duolingo.cn/2023-05-23/batch?locale=zh',
+        'https://api1.duolingo.com/2023-05-23/users/42',
+        'https://api23.duolingo.cn/2023-05-23/users/me#section'
+    ];
+    const invalid = [
+        'https://api1.duolingo.com/2023-05-23/batch-other',
+        'https://api1.duolingo.com/2023-05-23/users/',
+        'https://api1.duolingo.com/2023-05-23/users/42/progress',
+        'https://api1.duolingo.com/other?to=/2023-05-23/users/42',
+        'https://api1.duolingo.com.example/2023-05-23/users/42'
+    ];
+    for (const pattern of patterns) {
+        for (const url of valid) assert.ok(pattern.test(url), url);
+        for (const url of invalid) assert.equal(pattern.test(url), false, url);
     }
 });

@@ -42,19 +42,22 @@ async function onResponse(context, request, response) {
         const applyGold = (userdata) => {
             const timestamp = Math.floor(Date.now() / 1000);
             if (!userdata.shopItems) userdata.shopItems = [];
-            userdata.shopItems.push({
-                id: 'gold_subscription',
-                purchaseDate: timestamp - 172800,
-                purchasePrice: 0,
-                subscriptionInfo: {
-                    expectedExpiration: timestamp + 31536000,
-                    productId: "com.duolingo.DuolingoMobile.subscription.Gold.TwelveMonth.24Q2Max.168",
-                    renewer: 'APPLE',
-                    renewing: true,
-                    tier: 'twelve_month',
-                    type: 'gold'
-                }
-            });
+            const hasGold = userdata.shopItems.some(item => item?.id === 'gold_subscription');
+            if (!hasGold) {
+                userdata.shopItems.push({
+                    id: 'gold_subscription',
+                    purchaseDate: timestamp - 172800,
+                    purchasePrice: 0,
+                    subscriptionInfo: {
+                        expectedExpiration: timestamp + 31536000,
+                        productId: "com.duolingo.DuolingoMobile.subscription.Gold.TwelveMonth.24Q2Max.168",
+                        renewer: 'APPLE',
+                        renewing: true,
+                        tier: 'twelve_month',
+                        type: 'gold'
+                    }
+                });
+            }
             userdata.subscriberLevel = 'GOLD';
             if (!userdata.trackingProperties) userdata.trackingProperties = {};
             userdata.trackingProperties.has_item_immersive_subscription = true;

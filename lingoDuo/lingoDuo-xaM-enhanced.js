@@ -47,7 +47,7 @@ function updateUserProfile(profile) {
 
     const applyGold = (userdata) => {
         if (!userdata.shopItems) userdata.shopItems = [];
-        const hasGold = userdata.shopItems.some(item => item.id === 'gold_subscription');
+        const hasGold = userdata.shopItems.some(item => item?.id === 'gold_subscription');
         if (!hasGold) {
             userdata.shopItems.push({
                 id: 'gold_subscription',
@@ -71,24 +71,19 @@ function updateUserProfile(profile) {
             "has_item_live_subscription",
             "has_item_gold_subscription",
             "has_item_max_subscription"
-        ].forEach(p => userdata.trackingProperties[p] = true);
+        ].forEach(property => userdata.trackingProperties[property] = true);
     };
 
     const applyXpBoost = (userdata) => {
         const xpMultiplier = options.xpMultiplier;
         if (!xpMultiplier) return;
         if (!userdata.shopItems) userdata.shopItems = [];
-        let foundXpBoost = false;
-        for (let i = 0; i < userdata.shopItems.length; i++) {
-            if (userdata.shopItems[i].id === 'xp_boost_stackable') {
-                userdata.shopItems[i].purchaseDate = now;
-                userdata.shopItems[i].expectedExpirationDate = now + 3600;
-                userdata.shopItems[i].xpBoostMultiplier = xpMultiplier;
-                foundXpBoost = true;
-                break;
-            }
-        }
-        if (!foundXpBoost) {
+        const xpBoost = userdata.shopItems.find(item => item?.id === 'xp_boost_stackable');
+        if (xpBoost) {
+            xpBoost.purchaseDate = now;
+            xpBoost.expectedExpirationDate = now + 3600;
+            xpBoost.xpBoostMultiplier = xpMultiplier;
+        } else {
             userdata.shopItems.push({
                 id: 'xp_boost_stackable',
                 purchaseDate: now,
@@ -103,11 +98,11 @@ function updateUserProfile(profile) {
         if (!options.unlockAll) return;
         if (userdata.currentCourse && Array.isArray(userdata.currentCourse.pathSectioned)) {
             userdata.currentCourse.pathSectioned.forEach(section => {
-                if (Array.isArray(section.units)) {
+                if (Array.isArray(section?.units)) {
                     section.units.forEach(unit => {
-                        if (Array.isArray(unit.levels)) {
+                        if (Array.isArray(unit?.levels)) {
                             unit.levels.forEach(level => {
-                                if (level.state === 'locked') level.state = 'active';
+                                if (level?.state === 'locked') level.state = 'active';
                             });
                         }
                     });
