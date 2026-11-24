@@ -1,7 +1,49 @@
-try {
-    const obj = JSON.parse($response.body);
+function rewriteProfileBody(response, updateProfile) {
+    // 204、205 无正文，206 只有部分正文。
+    const hasContent = status => status == null ||
+        (status >= 200 && status < 300 && (status < 204 || status > 206));
+    const isRecord = value => value && typeof value === 'object' &&
+        !Array.isArray(value) && !value.error && !value.errorCode;
+    if (!hasContent(response.statusCode ?? response.status)) return;
+    const body = response.body;
+    if (typeof body !== 'string' || !body) return;
+
+    const data = JSON.parse(body);
+    if (!isRecord(data)) return;
+    let profile = data;
+    let entry;
+    if ('responses' in data) {
+        if (!Array.isArray(data.responses) || data.responses.length < 2) return;
+        entry = data.responses[0];
+        if (!isRecord(entry) || !hasContent(entry.statusCode ?? entry.status)) return;
+        if (Object.keys(entry.headers || {}).some(key => key.toLowerCase() === 'etag')) return;
+        profile = typeof entry.body === 'string' ? JSON.parse(entry.body) : entry.body;
+        if (!isRecord(profile)) return;
+    }
+
+    const { shopItems, subscriberLevel, trackingProperties } = profile;
+    if (shopItems != null && !Array.isArray(shopItems)) return;
+    if (trackingProperties != null && (typeof trackingProperties !== 'object' || Array.isArray(trackingProperties))) return;
+    if (!Array.isArray(shopItems) && typeof subscriberLevel !== 'string' && !(profile.id && trackingProperties)) return;
+
+    updateProfile(profile);
+    if (entry && typeof entry.body === 'string') entry.body = JSON.stringify(profile);
+    return JSON.stringify(data);
+}
+
+function readOptions(input) {
+    const { xp_boost, multiplier, unlock_all } = input || {};
+    const enabled = value => value === true || value === 'true' || value === 1 || value === '1';
+    const validMultiplier = [2, 3, '2', '3'].includes(multiplier);
+    return {
+        xpMultiplier: enabled(xp_boost) && validMultiplier ? Number(multiplier) : 0,
+        unlockAll: enabled(unlock_all)
+    };
+}
+
+function updateUserProfile(profile) {
     const now = Math.floor(Date.now() / 1000);
-    const args = (typeof $argument !== 'undefined' && $argument) ? $argument : {};
+    const options = readOptions(typeof $argument === 'undefined' ? null : $argument);
 
     const applyGold = (userdata) => {
         if (!userdata.shopItems) userdata.shopItems = [];
@@ -33,8 +75,8 @@ try {
     };
 
     const applyXpBoost = (userdata) => {
-        if (!args.xp_boost) return;
-        const xpMultiplier = parseInt(args.multiplier);
+        const xpMultiplier = options.xpMultiplier;
+        if (!xpMultiplier) return;
         if (!userdata.shopItems) userdata.shopItems = [];
         let foundXpBoost = false;
         for (let i = 0; i < userdata.shopItems.length; i++) {
@@ -58,7 +100,7 @@ try {
     };
 
     const applyUnlockAll = (userdata) => {
-        if (!args.unlock_all) return;
+        if (!options.unlockAll) return;
         if (userdata.currentCourse && Array.isArray(userdata.currentCourse.pathSectioned)) {
             userdata.currentCourse.pathSectioned.forEach(section => {
                 if (Array.isArray(section.units)) {
@@ -74,35 +116,17 @@ try {
         }
     };
 
-    const applyAll = (userdata) => {
-        applyGold(userdata);
-        applyXpBoost(userdata);
-        applyUnlockAll(userdata);
-    };
+    applyGold(profile);
+    applyXpBoost(profile);
+    applyUnlockAll(profile);
+}
 
-    if (obj.responses && obj.responses.length >= 2) {
-        if (obj.responses[0].headers && 'etag' in obj.responses[0].headers) {
-            $done({});
-        } else {
-            const b0 = obj.responses[0].body;
-            if (typeof b0 === 'string') {
-                const userdata = JSON.parse(b0);
-                applyAll(userdata);
-                obj.responses[0].body = JSON.stringify(userdata);
-            } else {
-                applyAll(b0);
-                obj.responses[0].body = b0;
-            }
-            $done({ body: JSON.stringify(obj) });
-        }
-    } else if (obj && typeof obj === 'object' &&
-               (obj.shopItems !== undefined || obj.subscriberLevel !== undefined ||
-                (obj.id && obj.trackingProperties))) {
-        applyAll(obj);
-        $done({ body: JSON.stringify(obj) });
-    } else {
-        $done({});
+{
+    let body;
+    try {
+        body = rewriteProfileBody($response, updateUserProfile);
+    } catch (e) {
+        // 无法解析时保留原始响应。
     }
-} catch (e) {
-    $done({});
+    $done(body === undefined ? {} : { body });
 }

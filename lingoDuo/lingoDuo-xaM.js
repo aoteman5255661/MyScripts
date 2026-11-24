@@ -1,8 +1,39 @@
-try {
-    const obj = JSON.parse($response.body);
-    const now = Math.floor(Date.now() / 1000);
+function rewriteProfileBody(response, updateProfile) {
+    // 204、205 无正文，206 只有部分正文。
+    const hasContent = status => status == null ||
+        (status >= 200 && status < 300 && (status < 204 || status > 206));
+    const isRecord = value => value && typeof value === 'object' &&
+        !Array.isArray(value) && !value.error && !value.errorCode;
+    if (!hasContent(response.statusCode ?? response.status)) return;
+    const body = response.body;
+    if (typeof body !== 'string' || !body) return;
 
+    const data = JSON.parse(body);
+    if (!isRecord(data)) return;
+    let profile = data;
+    let entry;
+    if ('responses' in data) {
+        if (!Array.isArray(data.responses) || data.responses.length < 2) return;
+        entry = data.responses[0];
+        if (!isRecord(entry) || !hasContent(entry.statusCode ?? entry.status)) return;
+        if (Object.keys(entry.headers || {}).some(key => key.toLowerCase() === 'etag')) return;
+        profile = typeof entry.body === 'string' ? JSON.parse(entry.body) : entry.body;
+        if (!isRecord(profile)) return;
+    }
+
+    const { shopItems, subscriberLevel, trackingProperties } = profile;
+    if (shopItems != null && !Array.isArray(shopItems)) return;
+    if (trackingProperties != null && (typeof trackingProperties !== 'object' || Array.isArray(trackingProperties))) return;
+    if (!Array.isArray(shopItems) && typeof subscriberLevel !== 'string' && !(profile.id && trackingProperties)) return;
+
+    updateProfile(profile);
+    if (entry && typeof entry.body === 'string') entry.body = JSON.stringify(profile);
+    return JSON.stringify(data);
+}
+
+function profileChanges(response) {
     const applyGold = (userdata) => {
+        const now = Math.floor(Date.now() / 1000);
         if (!userdata.shopItems) userdata.shopItems = [];
         userdata.shopItems.push({
             id: 'gold_subscription',
@@ -26,24 +57,15 @@ try {
         userdata.trackingProperties.has_item_max_subscription = true;
     };
 
-    if (obj.responses && obj.responses.length >= 2) {
-        if (obj.responses[0].headers && 'etag' in obj.responses[0].headers) $done({});
-        else {
-            const b0 = obj.responses[0].body;
-            if (typeof b0 === 'string') {
-                const userdata = JSON.parse(b0);
-                applyGold(userdata);
-                obj.responses[0].body = JSON.stringify(userdata);
-            } else {
-                applyGold(b0);
-                obj.responses[0].body = b0;
-            }
-            $done({ body: JSON.stringify(obj) });
-        }
-    } else if (obj && typeof obj === 'object' && (obj.shopItems !== undefined || obj.subscriberLevel !== undefined || (obj.id && obj.trackingProperties))) {
-        applyGold(obj);
-        $done({ body: JSON.stringify(obj) });
-    } else $done({});
-} catch (e) {
-    $done({});
+    return rewriteProfileBody(response, applyGold);
+}
+
+{
+    let body;
+    try {
+        body = profileChanges($response);
+    } catch (e) {
+        // 无法解析时保留原始响应。
+    }
+    $done(body === undefined ? {} : { body });
 }

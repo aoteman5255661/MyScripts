@@ -4,12 +4,43 @@ async function onRequest(context, request) {
     return request;
 }
 
+function rewriteProfileBody(response, updateProfile) {
+    // 204、205 无正文，206 只有部分正文。
+    const hasContent = status => status == null ||
+        (status >= 200 && status < 300 && (status < 204 || status > 206));
+    const isRecord = value => value && typeof value === 'object' &&
+        !Array.isArray(value) && !value.error && !value.errorCode;
+    if (!hasContent(response.statusCode ?? response.status)) return;
+    const body = response.body;
+    if (typeof body !== 'string' || !body) return;
+
+    const data = JSON.parse(body);
+    if (!isRecord(data)) return;
+    let profile = data;
+    let entry;
+    if ('responses' in data) {
+        if (!Array.isArray(data.responses) || data.responses.length < 2) return;
+        entry = data.responses[0];
+        if (!isRecord(entry) || !hasContent(entry.statusCode ?? entry.status)) return;
+        if (Object.keys(entry.headers || {}).some(key => key.toLowerCase() === 'etag')) return;
+        profile = typeof entry.body === 'string' ? JSON.parse(entry.body) : entry.body;
+        if (!isRecord(profile)) return;
+    }
+
+    const { shopItems, subscriberLevel, trackingProperties } = profile;
+    if (shopItems != null && !Array.isArray(shopItems)) return;
+    if (trackingProperties != null && (typeof trackingProperties !== 'object' || Array.isArray(trackingProperties))) return;
+    if (!Array.isArray(shopItems) && typeof subscriberLevel !== 'string' && !(profile.id && trackingProperties)) return;
+
+    updateProfile(profile);
+    if (entry && typeof entry.body === 'string') entry.body = JSON.stringify(profile);
+    return JSON.stringify(data);
+}
+
 async function onResponse(context, request, response) {
     try {
-        const obj = JSON.parse(response.body);
-        const timestamp = Math.floor(Date.now() / 1000);
-
         const applyGold = (userdata) => {
+            const timestamp = Math.floor(Date.now() / 1000);
             if (!userdata.shopItems) userdata.shopItems = [];
             userdata.shopItems.push({
                 id: 'gold_subscription',
@@ -33,25 +64,10 @@ async function onResponse(context, request, response) {
             userdata.trackingProperties.has_item_max_subscription = true;
         };
 
-        if (obj.responses && obj.responses.length >= 2) {
-            if ('etag' in (obj.responses[0].headers || {})) return response;
-            const b0 = obj.responses[0].body;
-            if (typeof b0 === 'string') {
-                const userdata = JSON.parse(b0);
-                applyGold(userdata);
-                obj.responses[0].body = JSON.stringify(userdata);
-            } else {
-                applyGold(b0);
-                obj.responses[0].body = b0;
-            }
-        } else if (obj.shopItems !== undefined || obj.subscriberLevel !== undefined || obj.id) {
-            applyGold(obj);
-        } else {
-            return response;
-        }
-
-        const finalBody = JSON.stringify(obj);
-        response.body = finalBody;
-    } catch (e) {}
+        const body = rewriteProfileBody(response, applyGold);
+        if (body !== undefined) response.body = body;
+    } catch (e) {
+        // 无法解析时保留原始响应。
+    }
     return response;
 }
